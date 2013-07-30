@@ -481,6 +481,8 @@ static int vmx_run()
 			"vmresume\n\t"
 			"2: "
 			"setbe %0\n\t"
+			"jbe vmx_return\n\t"
+			"ud2\n\t"
 			"vmx_return:\n\t"
 			SAVE_GPR_C
 			SAVE_RFLAGS
@@ -505,15 +507,15 @@ static int vmx_run()
 		return 0;
 	case VMX_TEST_LAUNCH_ERR:
 		printf("%s : vmlaunch failed.\n", __func__);
-		if ((!(regs.rflags & X86_EFLAGS_CF) && !(regs.rflags & X86_EFLAGS_ZF))
-			|| ((regs.rflags & X86_EFLAGS_CF) && (regs.rflags & X86_EFLAGS_ZF)))
+		if ((!(regs.host_rflags & X86_EFLAGS_CF) && !(regs.host_rflags & X86_EFLAGS_ZF))
+			|| ((regs.host_rflags & X86_EFLAGS_CF) && (regs.host_rflags & X86_EFLAGS_ZF)))
 			printf("\tvmlaunch set wrong flags\n");
 		report("test vmlaunch", 0);
 		break;
 	case VMX_TEST_RESUME_ERR:
 		printf("%s : vmresume failed.\n", __func__);
-		if ((!(regs.rflags & X86_EFLAGS_CF) && !(regs.rflags & X86_EFLAGS_ZF))
-			|| ((regs.rflags & X86_EFLAGS_CF) && (regs.rflags & X86_EFLAGS_ZF)))
+		if ((!(regs.host_rflags & X86_EFLAGS_CF) && !(regs.host_rflags & X86_EFLAGS_ZF))
+			|| ((regs.host_rflags & X86_EFLAGS_CF) && (regs.host_rflags & X86_EFLAGS_ZF)))
 			printf("\tvmresume set wrong flags\n");
 		report("test vmresume", 0);
 		break;
@@ -540,7 +542,6 @@ static int test_run(struct vmx_test *test)
 	test->exits = 0;
 	current = test;
 	regs = test->guest_regs;
-	vmcs_write(GUEST_RFLAGS, regs.rflags | 0x2);
 	launched = 0;
 	printf("\nTest suite : %s\n", test->name);
 	vmx_run();
