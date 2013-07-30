@@ -27,7 +27,7 @@ struct regs {
 	u64 r13;
 	u64 r14;
 	u64 r15;
-	u64 host_rflags;
+	u64 rflags;
 };
 
 struct vmx_test {
