@@ -18,6 +18,7 @@ ulong fix_cr4_set, fix_cr4_clr;
 struct regs regs;
 struct vmx_test *current;
 u64 hypercall_field = 0;
+bool launched;
 
 extern u64 gdt64_desc[];
 extern u64 idt_descr[];
@@ -37,41 +38,11 @@ static void report(const char *name, int result)
 	}
 }
 
-static int vmcs_clear(struct vmcs *vmcs)
-{
-	bool ret;
-	asm volatile ("vmclear %1; setbe %0" : "=q" (ret) : "m" (vmcs) : "cc");
-	return ret;
-}
-
-static u64 vmcs_read(enum Encoding enc)
-{
-	u64 val;
-	asm volatile ("vmread %1, %0" : "=rm" (val) : "r" ((u64)enc) : "cc");
-	return val;
-}
-
-static int vmcs_write(enum Encoding enc, u64 val)
-{
-	bool ret;
-	asm volatile ("vmwrite %1, %2; setbe %0"
-		: "=q"(ret) : "rm" (val), "r" ((u64)enc) : "cc");
-	return ret;
-}
-
 static int make_vmcs_current(struct vmcs *vmcs)
 {
 	bool ret;
 
 	asm volatile ("vmptrld %1; setbe %0" : "=q" (ret) : "m" (vmcs) : "cc");
-	return ret;
-}
-
-static int save_vmcs(struct vmcs **vmcs)
-{
-	bool ret;
-
-	asm volatile ("vmptrst %1; setbe %0" : "=q" (ret) : "m" (*vmcs) : "cc");
 	return ret;
 }
 
@@ -88,7 +59,7 @@ asm(
 	"	vmresume\n\t"
 );
 
-void syscall_handler(u64 syscall_no)
+static void __attribute__((__used__)) syscall_handler(u64 syscall_no)
 {
 	current->syscall_handler(syscall_no);
 }
@@ -135,8 +106,8 @@ static void test_vmclear(void)
 {
 	u64 rflags;
 
-	rflags = get_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
-	set_rflags(rflags);
+	rflags = read_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
+	write_rflags(rflags);
 	report("test vmclear", vmcs_clear(vmcs_root) == 0);
 }
 
@@ -145,13 +116,13 @@ static void test_vmxoff(void)
 	int ret;
 	u64 rflags;
 
-	rflags = get_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
-	set_rflags(rflags);
+	rflags = read_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
+	write_rflags(rflags);
 	ret = vmx_off();
 	report("test vmxoff", !ret);
 }
 
-void guest_main(void)
+static void __attribute__((__used__)) guest_main(void)
 {
 	current->guest_main();
 }
@@ -229,13 +200,13 @@ static void init_vmcs_guest(void)
 	guest_cr4 = read_cr4();
 	guest_cr3 = read_cr3();
 	if (ctrl_enter & ENT_GUEST_64) {
-		guest_cr0 |= CR0_PG;
-		guest_cr4 |= CR4_PAE;
+		guest_cr0 |= X86_CR0_PG;
+		guest_cr4 |= X86_CR4_PAE;
 	}
 	if ((ctrl_enter & ENT_GUEST_64) == 0)
-		guest_cr4 &= (~CR4_PCIDE);
-	if (guest_cr0 & CR0_PG)
-		guest_cr0 |= CR0_PE;
+		guest_cr4 &= (~X86_CR4_PCIDE);
+	if (guest_cr0 & X86_CR0_PG)
+		guest_cr0 |= X86_CR0_PE;
 	vmcs_write(GUEST_CR0, guest_cr0);
 	vmcs_write(GUEST_CR3, guest_cr3);
 	vmcs_write(GUEST_CR4, guest_cr4);
@@ -362,7 +333,7 @@ static void init_vmx(void)
 		ept_vpid.val = rdmsr(MSR_IA32_VMX_EPT_VPID_CAP);
 
 	write_cr0((read_cr0() & fix_cr0_clr) | fix_cr0_set);
-	write_cr4((read_cr4() & fix_cr4_clr) | fix_cr4_set | CR4_VMXE);
+	write_cr4((read_cr4() & fix_cr4_clr) | fix_cr4_set | X86_CR4_VMXE);
 
 	*vmxon_region = basic.revision;
 
@@ -395,8 +366,8 @@ static int test_vmxon(void)
 	int ret;
 	u64 rflags;
 
-	rflags = get_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
-	set_rflags(rflags);
+	rflags = read_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
+	write_rflags(rflags);
 	ret = vmx_on();
 	report("test vmxon", !ret);
 	return ret;
@@ -409,8 +380,8 @@ static void test_vmptrld(void)
 
 	vmcs = alloc_page();
 	vmcs->revision_id = basic.revision;
-	rflags = get_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
-	set_rflags(rflags);
+	rflags = read_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
+	write_rflags(rflags);
 	report("test vmptrld", make_vmcs_current(vmcs) == 0);
 }
 
@@ -423,14 +394,14 @@ static void test_vmptrst(void)
 	vmcs1 = alloc_page();
 	memset(vmcs1, 0, PAGE_SIZE);
 	init_vmcs(&vmcs1);
-	rflags = get_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
-	set_rflags(rflags);
-	ret = save_vmcs(&vmcs2);
+	rflags = read_rflags() | X86_EFLAGS_CF | X86_EFLAGS_ZF;
+	write_rflags(rflags);
+	ret = vmcs_save(&vmcs2);
 	report("test vmptrst", (!ret) && (vmcs1 == vmcs2));
 }
 
 /* This function can only be called in guest */
-void hypercall(u32 hypercall_no)
+static void __attribute__((__used__)) hypercall(u32 hypercall_no)
 {
 	u64 val = 0;
 	val = (hypercall_no & HYPERCALL_MASK) | HYPERCALL_BIT;
@@ -492,29 +463,66 @@ static int exit_handler()
 
 static int vmx_run()
 {
-	u32 eax;
-	bool ret;
+	u32 ret = 0, fail = 0;
 
-	vmcs_write(HOST_RSP, get_rsp());
-	ret = vmlaunch();
-	while (!ret) {
-		asm volatile(
+	while (1) {
+		asm volatile (
+			"mov %%rsp, %%rsi\n\t"
+			"mov %2, %%rdi\n\t"
+			"vmwrite %%rsi, %%rdi\n\t"
+
+			LOAD_GPR_C
+			"cmpl $0, %1\n\t"
+			"jne 1f\n\t"
+			LOAD_RFLAGS
+			"vmlaunch\n\t"
+			"jmp 2f\n\t"
+			"1: "
+			"vmresume\n\t"
+			"2: "
+			"setbe %0\n\t"
+			"jbe vmx_return\n\t"
+			"ud2\n\t"
 			"vmx_return:\n\t"
-			SAVE_GPR
+			SAVE_GPR_C
+			SAVE_RFLAGS
+			: "=m"(fail)
+			: "m"(launched), "i"(HOST_RSP)
+			: "rdi", "rsi", "memory", "cc"
+
 		);
-		eax = exit_handler();
-		switch (eax) {
-		case VMX_TEST_VMEXIT:
-			return 0;
-		case VMX_TEST_RESUME:
-			break;
-		default:
-			printf("%s : unhandled ret from exit_handler.\n", __func__);
-			return 1;
+		if (fail)
+			ret = launched ? VMX_TEST_RESUME_ERR :
+				VMX_TEST_LAUNCH_ERR;
+		else {
+			launched = 1;
+			ret = exit_handler();
 		}
-		ret = vmresume();
+		if (ret != VMX_TEST_RESUME)
+			break;
 	}
-	printf("%s : vmenter failed.\n", __func__);
+	launched = 0;
+	switch (ret) {
+	case VMX_TEST_VMEXIT:
+		return 0;
+	case VMX_TEST_LAUNCH_ERR:
+		printf("%s : vmlaunch failed.\n", __func__);
+		if ((!(regs.host_rflags & X86_EFLAGS_CF) && !(regs.host_rflags & X86_EFLAGS_ZF))
+			|| ((regs.host_rflags & X86_EFLAGS_CF) && (regs.host_rflags & X86_EFLAGS_ZF)))
+			printf("\tvmlaunch set wrong flags\n");
+		report("test vmlaunch", 0);
+		break;
+	case VMX_TEST_RESUME_ERR:
+		printf("%s : vmresume failed.\n", __func__);
+		if ((!(regs.host_rflags & X86_EFLAGS_CF) && !(regs.host_rflags & X86_EFLAGS_ZF))
+			|| ((regs.host_rflags & X86_EFLAGS_CF) && (regs.host_rflags & X86_EFLAGS_ZF)))
+			printf("\tvmresume set wrong flags\n");
+		report("test vmresume", 0);
+		break;
+	default:
+		printf("%s : unhandled ret from exit_handler, ret=%d.\n", __func__, ret);
+		break;
+	}
 	return 1;
 }
 
@@ -534,6 +542,7 @@ static int test_run(struct vmx_test *test)
 	test->exits = 0;
 	current = test;
 	regs = test->guest_regs;
+	launched = 0;
 	printf("\nTest suite : %s\n", test->name);
 	vmx_run();
 	if (vmx_off()) {

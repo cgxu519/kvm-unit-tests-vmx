@@ -27,6 +27,7 @@ struct regs {
 	u64 r13;
 	u64 r14;
 	u64 r15;
+	u64 host_rflags;
 };
 
 struct vmx_test {
@@ -362,17 +363,6 @@ enum Ctrl1 {
 	CPU_URG			= 1ul << 7,
 };
 
-#define SEL_NULL_DESC		0x0
-#define SEL_KERN_CODE_64	0x8
-#define SEL_KERN_DATA_64	0x10
-#define SEL_USER_CODE_64	0x18
-#define SEL_USER_DATA_64	0x20
-#define SEL_CODE_32		0x28
-#define SEL_DATA_32		0x30
-#define SEL_CODE_16		0x38
-#define SEL_DATA_16		0x40
-#define SEL_TSS_RUN		0x48
-
 #define SAVE_GPR				\
 	"xchg %rax, regs\n\t"			\
 	"xchg %rbx, regs+0x8\n\t"		\
@@ -411,11 +401,13 @@ enum Ctrl1 {
 
 #define LOAD_GPR_C	SAVE_GPR_C
 
-#define CR0_PE		(1ul << 0)
-#define CR0_PG		(1ul << 31)
-#define CR4_VMXE	(1ul << 0)
-#define CR4_PAE		(1ul << 5)
-#define CR4_PCIDE	(1ul << 17)
+#define SAVE_RFLAGS		\
+	"pushf\n\t"			\
+	"pop regs+0x80\n\t"
+
+#define LOAD_RFLAGS		\
+	"push regs+0x80\n\t"	\
+	"popf\n\t"
 
 #define VMX_IO_SIZE_MASK		0x7
 #define _VMX_IO_BYTE			1
@@ -430,48 +422,45 @@ enum Ctrl1 {
 #define VMX_IO_PORT_MASK		0xFFFF0000
 #define VMX_IO_PORT_SHIFT		16
 
-#define VMX_TEST_VMEXIT		1
-#define VMX_TEST_EXIT		2
-#define VMX_TEST_RESUME		3
+#define VMX_TEST_VMEXIT			1
+#define VMX_TEST_EXIT			2
+#define VMX_TEST_RESUME			3
+#define VMX_TEST_LAUNCH_ERR		4
+#define VMX_TEST_RESUME_ERR		5
 
 #define HYPERCALL_BIT		(1ul << 12)
 #define HYPERCALL_MASK		0xFFF
 #define HYPERCALL_VMEXIT	0x1
 
-
-inline u64 get_rflags(void)
-{
-	u64 r;
-	asm volatile("pushf; pop %0\n\t" : "=q"(r) : : "cc");
-	return r;
-}
-
-inline void set_rflags(u64 r)
-{
-	asm volatile("push %0; popf\n\t" : : "q"(r) : "cc");
-}
-
-inline u64 get_rsp(void)
-{
-	u64 r;
-	asm volatile("mov %%rsp, %0\n\t" : "=r"(r));
-	return r;
-}
-
-inline bool vmlaunch(void)
+static inline int vmcs_clear(struct vmcs *vmcs)
 {
 	bool ret;
-	asm volatile("vmlaunch;setbe %0\n\t" : "=m"(ret) : : "memory");
+	asm volatile ("vmclear %1; setbe %0" : "=q" (ret) : "m" (vmcs) : "cc");
 	return ret;
 }
 
-inline bool vmresume(void)
+static inline u64 vmcs_read(enum Encoding enc)
+{
+	u64 val;
+	asm volatile ("vmread %1, %0" : "=rm" (val) : "r" ((u64)enc) : "cc");
+	return val;
+}
+
+static inline int vmcs_write(enum Encoding enc, u64 val)
 {
 	bool ret;
-	asm volatile(LOAD_GPR_C "vmresume;setbe %0\n\t" : "=m"(ret) : : "memory");
+	asm volatile ("vmwrite %1, %2; setbe %0"
+		: "=q"(ret) : "rm" (val), "r" ((u64)enc) : "cc");
 	return ret;
 }
 
+static inline int vmcs_save(struct vmcs **vmcs)
+{
+	bool ret;
+
+	asm volatile ("vmptrst %1; setbe %0" : "=q" (ret) : "m" (*vmcs) : "cc");
+	return ret;
+}
 
 #endif
 
