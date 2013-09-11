@@ -44,14 +44,6 @@ void report(const char *name, int result)
 	}
 }
 
-static int make_vmcs_current(struct vmcs *vmcs)
-{
-	bool ret;
-
-	asm volatile ("vmptrld %1; setbe %0" : "=q" (ret) : "m" (vmcs) : "cc");
-	return ret;
-}
-
 /* entry_sysenter */
 asm(
 	".align	4, 0x90\n\t"
@@ -631,6 +623,7 @@ static int exit_handler()
 static int vmx_run()
 {
 	u32 ret = 0, fail = 0;
+	bool entry_double_fail = false;
 
 	while (1) {
 		asm volatile (
@@ -657,28 +650,41 @@ static int vmx_run()
 
 		);
 		if (fail)
-			ret = launched ? VMX_TEST_RESUME_ERR :
-				VMX_TEST_LAUNCH_ERR;
+			if (entry_double_fail)
+				ret = launched ? VMX_TEST_RESUME_ERR :
+					VMX_TEST_LAUNCH_ERR;
+			else {
+				ret = current->entry_failed_handler(launched);
+				if (ret == VMX_TEST_RESUME) {
+					entry_double_fail = true;
+					host_rflags &= ~(X86_EFLAGS_ZF |
+						X86_EFLAGS_CF);
+				}
+			}
 		else {
 			launched = 1;
+			entry_double_fail = false;
 			ret = exit_handler();
 		}
 		if (ret != VMX_TEST_RESUME)
 			break;
+		ret = fail = 0;
 	}
 	launched = 0;
 	switch (ret) {
 	case VMX_TEST_VMEXIT:
 		return 0;
 	case VMX_TEST_LAUNCH_ERR:
-		printf("%s : vmlaunch failed.\n", __func__);
+		printf("%s : vmlaunch failed, entry_double_fail=%d.\n",
+			__func__, entry_double_fail);
 		if ((!(host_rflags & X86_EFLAGS_CF) && !(host_rflags & X86_EFLAGS_ZF))
 			|| ((host_rflags & X86_EFLAGS_CF) && (host_rflags & X86_EFLAGS_ZF)))
 			printf("\tvmlaunch set wrong flags\n");
 		report("test vmlaunch", 0);
 		break;
 	case VMX_TEST_RESUME_ERR:
-		printf("%s : vmresume failed.\n", __func__);
+		printf("%s : vmresume failed, entry_double_fail=%d.\n",
+			__func__, entry_double_fail);
 		if ((!(host_rflags & X86_EFLAGS_CF) && !(host_rflags & X86_EFLAGS_ZF))
 			|| ((host_rflags & X86_EFLAGS_CF) && (host_rflags & X86_EFLAGS_ZF)))
 			printf("\tvmresume set wrong flags\n");
@@ -700,12 +706,12 @@ static int test_run(struct vmx_test *test)
 		return 1;
 	}
 	init_vmcs(&(test->vmcs));
+	current = test;
 	/* Directly call test->init is ok here, init_vmcs has done
 	   vmcs init, vmclear and vmptrld*/
 	if (test->init)
-		test->init(test->vmcs);
+		test->init();
 	test->exits = 0;
-	current = test;
 	regs = test->guest_regs;
 	vmcs_write(GUEST_RFLAGS, regs.rflags | 0x2);
 	launched = 0;

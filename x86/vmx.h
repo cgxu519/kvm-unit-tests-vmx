@@ -4,7 +4,8 @@
 #include "libcflat.h"
 
 struct vmcs {
-	u32 revision_id; /* vmcs revision identifier */
+	u32 revision_id:31, /* vmcs revision identifier */
+		shadow:1; /* shadow-VMCS indicator */
 	u32 abort; /* VMX-abort indicator */
 	/* VMCS data */
 	char data[0];
@@ -32,10 +33,11 @@ struct regs {
 
 struct vmx_test {
 	const char *name;
-	void (*init)(struct vmcs *vmcs);
+	void (*init)();
 	void (*guest_main)();
 	int (*exit_handler)();
 	void (*syscall_handler)(u64 syscall_no);
+	int (*entry_failed_handler)();
 	struct regs guest_regs;
 	struct vmcs *vmcs;
 	int exits;
@@ -378,6 +380,7 @@ enum Ctrl1 {
 	CPU_URG			= 1ul << 7,
 	CPU_WBINVD		= 1ul << 6,
 	CPU_RDRAND		= 1ul << 11,
+	CPU_SHADOW		= 1ul << 14,
 };
 
 #define SAVE_GPR				\
@@ -511,6 +514,14 @@ extern union vmx_ctrl_cpu ctrl_cpu_rev[2];
 extern union vmx_ctrl_exit ctrl_exit_rev;
 extern union vmx_ctrl_ent ctrl_enter_rev;
 extern union vmx_ept_vpid  ept_vpid;
+
+static int make_vmcs_current(struct vmcs *vmcs)
+{
+	bool ret;
+
+	asm volatile ("vmptrld %1; setbe %0" : "=q" (ret) : "m" (vmcs) : "cc");
+	return ret;
+}
 
 static inline int vmcs_clear(struct vmcs *vmcs)
 {
