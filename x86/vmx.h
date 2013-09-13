@@ -344,6 +344,8 @@ enum Ctrl_exi {
 
 enum Ctrl_ent {
 	ENT_GUEST_64            = 1UL << 9,
+	ENT_ENT_SMM		= 1UL << 10,
+	ENT_DEATV_DM		= 1UL << 11,
 	ENT_LOAD_PAT		= 1UL << 14,
 	ENT_LOAD_EFER           = 1UL << 15,
 };
@@ -375,10 +377,13 @@ enum Ctrl0 {
 };
 
 enum Ctrl1 {
+	CPU_VIRT_APIC		= 1ul << 0,
 	CPU_EPT			= 1ul << 1,
+	CPU_VIRT_X2APIC		= 1ul << 4,
 	CPU_VPID		= 1ul << 5,
-	CPU_URG			= 1ul << 7,
 	CPU_WBINVD		= 1ul << 6,
+	CPU_URG			= 1ul << 7,
+	CPU_VIRT_INTR		= 1ul << 9,
 	CPU_RDRAND		= 1ul << 11,
 	CPU_SHADOW		= 1ul << 14,
 };
@@ -453,6 +458,7 @@ enum Ctrl1 {
 #define HYPERCALL_VMEXIT	0x1
 
 #define EPTP_PG_WALK_LEN_SHIFT	3ul
+#define EPTP_PG_WALK_LEN_MASK	0x31
 #define EPTP_AD_FLAG			(1ul << 6)
 
 #define EPT_MEM_TYPE_UC	0ul
@@ -460,6 +466,7 @@ enum Ctrl1 {
 #define EPT_MEM_TYPE_WT	4ul
 #define EPT_MEM_TYPE_WP	5ul
 #define EPT_MEM_TYPE_WB	6ul
+#define EPT_MEM_TYPE_MASK 0x7
 
 #define EPT_RA			1ul
 #define EPT_WA			2ul
@@ -505,6 +512,19 @@ enum Ctrl1 {
 
 #define INVEPT_SINGLE		1
 #define INVEPT_GLOBAL		2
+
+#define INTR_INFO_TYPE_MASK		0x00000700
+#define INTR_INFO_TYPE_SHIFT		8
+#define INTR_INFO_TYPE_EXT		0
+#define INTR_INFO_TYPE_REV		1
+#define INTR_INFO_TYPE_NMI		2
+#define INTR_INFO_TYPE_HARD_EXP		3
+#define INTR_INFO_TYPE_SOFT_INTR	4
+#define INTR_INFO_TYPE_PSE		5
+#define INTR_INFO_TYPE_SOFT_EXP		6
+#define INTR_INFO_TYPE_OTHER		7
+#define INTR_INFO_DELIVER_ERR		0x00000800
+#define INTR_INFO_VALID			0x80000000
 
 extern struct regs regs;
 

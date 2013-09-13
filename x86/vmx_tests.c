@@ -15,6 +15,13 @@ bool init_fail;
 unsigned long *pml4;
 u64 eptp;
 void *data_page1, *data_page2;
+static u32 cur_test;
+volatile static bool test_success;
+static u32 phy_addr_width;
+
+extern struct vmx_test *current;
+extern u64 host_rflags;
+extern bool launched;
 
 static inline void vmcall()
 {
@@ -1113,6 +1120,643 @@ static int ept_exit_handler()
 	return VMX_TEST_VMEXIT;
 }
 
+static int reset_vmstat(struct vmcs *vmcs)
+{
+	if (vmcs_clear(current->vmcs)) {
+		printf("\tERROR : %s : vmcs_clear failed.\n", __func__);
+		return -1;
+	}
+	if (make_vmcs_current(current->vmcs)) {
+		printf("\tERROR : %s : make_vmcs_current failed.\n", __func__);
+		return -1;
+	}
+	launched = 0;
+	return 0;
+}
+
+static int vmentry_vmcs_absence()
+{
+	vmcs_clear(current->vmcs);
+	return 0;
+}
+
+static int vmentry_vmlaunch_err()
+{
+	launched = 0;
+	return 0;
+}
+
+static int vmentry_vmresume_err()
+{
+	if (reset_vmstat(current->vmcs))
+		return -1;
+	launched = 1;
+	return 0;
+}
+
+static int vmentry_pin_ctrl()
+{
+	vmcs_write(PIN_CONTROLS, ~(ctrl_pin_rev.clr));
+	return 0;
+}
+
+static int vmentry_cpu0_ctrl()
+{
+	vmcs_write(CPU_EXEC_CTRL0, ~(ctrl_cpu_rev[0].clr));
+	return 0;
+}
+
+static int vmentry_cpu1_ctrl()
+{
+	u32 ctrl_cpu[2];
+	if (!(ctrl_cpu_rev[0].clr & CPU_SECONDARY)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu[0] = vmcs_read(CPU_EXEC_CTRL0);
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu[0] | CPU_SECONDARY);
+	vmcs_write(CPU_EXEC_CTRL1, ~(ctrl_cpu_rev[1].clr));
+	return 0;
+}
+
+static int vmentry_cr3_target_count()
+{
+	vmcs_write(CR3_TARGET_COUNT, 5);
+	return 0;
+}
+
+static int vmentry_iobmp_invalid1()
+{
+	u32 ctrl_cpu0;
+	if (!(ctrl_cpu_rev[0].clr & CPU_IO_BITMAP)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu0 = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu0 |= CPU_IO_BITMAP;
+	ctrl_cpu0 &= (~CPU_IO);
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu0);
+	vmcs_write(IO_BITMAP_A, 0x1);
+	vmcs_write(IO_BITMAP_B, 0x1);
+	return 0;
+}
+
+static int vmentry_iobmp_invalid2()
+{
+	u32 ctrl_cpu0;
+	if (!(ctrl_cpu_rev[0].clr & CPU_IO_BITMAP)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu0 = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu0 |= CPU_IO_BITMAP;
+	ctrl_cpu0 &= (~CPU_IO);
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu0);
+	vmcs_write(IO_BITMAP_A, 1ull << (phy_addr_width + 1));
+	vmcs_write(IO_BITMAP_B, 1ull << (phy_addr_width + 1));
+	return 0;
+}
+
+static int vmentry_msrbmp_invalid1()
+{
+	u32 ctrl_cpu0;
+	if (!(ctrl_cpu_rev[0].clr & CPU_MSR_BITMAP)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu0 = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu0 |= CPU_MSR_BITMAP;
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu0);
+	vmcs_write(MSR_BITMAP, 0x1);
+	return 0;
+}
+
+static int vmentry_msrbmp_invalid2()
+{
+	u32 ctrl_cpu0;
+	if (!(ctrl_cpu_rev[0].clr & CPU_MSR_BITMAP)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu0 = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu0 |= CPU_MSR_BITMAP;
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu0);
+	vmcs_write(MSR_BITMAP, 1ull << (phy_addr_width + 1));
+	return 0;
+}
+
+static int vmentry_nmi()
+{
+	u32 ctrl_pin;
+	if (!(ctrl_pin_rev.clr & PIN_NMI) ||
+			!(ctrl_pin_rev.clr & PIN_VIRT_NMI)) {
+		test_success = true;
+		return 0;
+	}
+	ctrl_pin = vmcs_read(PIN_CONTROLS);
+	ctrl_pin &= ~(PIN_NMI);
+	ctrl_pin |= PIN_VIRT_NMI;
+	vmcs_write(PIN_CONTROLS, ctrl_pin);
+	return 0;
+}
+
+static int vmentry_apic_invalid1()
+{
+	u32 ctrl_cpu[2];
+	if (!(ctrl_cpu_rev[0].clr & CPU_SECONDARY) ||
+			!(ctrl_cpu_rev[1].clr & CPU_VIRT_APIC)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu[0] = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu[1] = vmcs_read(CPU_EXEC_CTRL1);
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu[0] | CPU_SECONDARY);
+	vmcs_write(CPU_EXEC_CTRL1, ctrl_cpu[1] | CPU_VIRT_APIC);
+	vmcs_write(APIC_ACCS_ADDR, 0x1);
+	return 0;
+}
+
+static int vmentry_apic_invalid2()
+{
+	u32 ctrl_cpu[2];
+	if (!(ctrl_cpu_rev[0].clr & CPU_SECONDARY) ||
+			!(ctrl_cpu_rev[1].clr & CPU_VIRT_APIC)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 0;
+	}
+	ctrl_cpu[0] = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu[1] = vmcs_read(CPU_EXEC_CTRL1);
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu[0] | CPU_SECONDARY);
+	vmcs_write(CPU_EXEC_CTRL1, ctrl_cpu[1] | CPU_VIRT_APIC);
+	vmcs_write(APIC_ACCS_ADDR, 1ull << (phy_addr_width + 1));
+	return 0;
+}
+
+
+static int vmentry_init_eptp()
+{
+	u32 ctrl_cpu[2];
+	if (!(ctrl_cpu_rev[0].clr & CPU_SECONDARY) ||
+			!(ctrl_cpu_rev[1].clr & CPU_EPT)) {
+		printf("\t%s : Features are not supported for nested.\n", __func__);
+		test_success = true;
+		return 1;
+	}
+	ctrl_cpu[0] = vmcs_read(CPU_EXEC_CTRL0);
+	ctrl_cpu[1] = vmcs_read(CPU_EXEC_CTRL1);
+	ctrl_cpu[0] = ctrl_cpu[0] | CPU_SECONDARY;
+	ctrl_cpu[1] = ctrl_cpu[1] | CPU_EPT;
+	vmcs_write(CPU_EXEC_CTRL0, ctrl_cpu[0]);
+	vmcs_write(CPU_EXEC_CTRL1, ctrl_cpu[1]);
+	if (setup_ept())
+		return 1;
+	return 0;
+}
+
+static int vmentry_eptp_memtype()
+{
+	if (vmentry_init_eptp())
+		return 0;
+	eptp &= (~EPT_MEM_TYPE_MASK);
+	eptp |= EPT_MEM_TYPE_WT;
+	vmcs_write(EPTP, eptp);
+	return 0;
+}
+
+static int vmentry_eptp_pwl()
+{
+	if (vmentry_init_eptp())
+		return 0;
+	eptp &= (~EPTP_PG_WALK_LEN_MASK);
+	vmcs_write(EPTP, eptp);
+	return 0;
+}
+
+static int vmentry_eptp_rsv_bits1()
+{
+	if (vmentry_init_eptp())
+		return 0;
+	eptp |= (1ull << 8);
+	vmcs_write(EPTP, eptp);
+	return 0;
+}
+
+static int vmentry_eptp_rsv_bits2()
+{
+	if (vmentry_init_eptp())
+		return 0;
+	eptp &= ~(PAGE_MASK);
+	eptp |= (1ull << (phy_addr_width + 1)) & PAGE_MASK;
+	vmcs_write(EPTP, eptp);
+	return 0;
+}
+
+
+static int vmentry_exit_ctrl()
+{
+	vmcs_write(EXI_CONTROLS, ~(ctrl_exit_rev.clr));
+	return 0;
+}
+
+static int vmentry_preempt()
+{
+	u32 ctrl_pin, ctrl_exit;
+	ctrl_pin = vmcs_read(PIN_CONTROLS);
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	ctrl_pin &= (~PIN_PREEMPT);
+	ctrl_exit |= EXI_SAVE_PREEMPT;
+	vmcs_write(PIN_CONTROLS, ctrl_pin);
+	vmcs_write(EXI_CONTROLS, ctrl_exit);
+	return 0;
+}
+
+static int vmentry_ent_ctrl()
+{
+	vmcs_write(ENT_CONTROLS, ~(ctrl_enter_rev.clr));
+	return 0;
+}
+
+static int vmentry_ent_smm()
+{
+	u32 ctrl_enter;
+	ctrl_enter = vmcs_read(ENT_CONTROLS);
+	ctrl_enter |= ENT_ENT_SMM;
+	vmcs_write(ENT_CONTROLS, ctrl_enter);
+	return 0;
+}
+
+static int vmentry_deatv_dm()
+{
+	u32 ctrl_enter;
+	ctrl_enter = vmcs_read(ENT_CONTROLS);
+	ctrl_enter |= ENT_DEATV_DM;
+	vmcs_write(ENT_CONTROLS, ctrl_enter);
+	return 0;
+}
+
+static int vmentry_invalid_cr0()
+{
+	u32 host_cr0;
+	host_cr0 = vmcs_read(HOST_CR0);
+	host_cr0 &= ~X86_CR0_PE;
+	vmcs_write(HOST_CR0, host_cr0);
+	return 0;
+}
+
+static int vmentry_invalid_cr4()
+{
+	u32 host_cr4;
+	host_cr4 = vmcs_read(HOST_CR4);
+	host_cr4 &= ~X86_CR4_VMXE;
+	vmcs_write(HOST_CR4, host_cr4);
+	return 0;
+}
+
+static int vmentry_invalid_cr3()
+{
+	u32 host_cr3;
+	host_cr3 = vmcs_read(HOST_CR3);
+	host_cr3 |= (1ull << 63);
+	vmcs_write(HOST_CR3, host_cr3);
+	return 0;
+}
+
+static int vmentry_sysenter_esp_addr()
+{
+	vmcs_write(HOST_SYSENTER_ESP, ~0ull);
+	return 0;
+}
+
+static int vmentry_sysenter_eip_addr()
+{
+	vmcs_write(HOST_SYSENTER_EIP, ~0ull);
+	return 0;
+}
+
+static int vmentry_host_PAT()
+{
+	u32 ctrl_exit;
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	ctrl_exit |= EXI_LOAD_PAT;
+	vmcs_write(EXI_CONTROLS, ctrl_exit);
+	vmcs_write(HOST_PAT, 0x3);
+	return 0;
+}
+
+static int vmentry_host_EFER1()
+{
+	u32 ctrl_exit;
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	ctrl_exit |= EXI_LOAD_EFER;
+	vmcs_write(EXI_CONTROLS, ctrl_exit);
+	vmcs_write(HOST_EFER, 0x2);
+	return 0;
+}
+
+static int vmentry_host_EFER2()
+{
+	u32 ctrl_exit;
+	u64 host_efer;
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	ctrl_exit |= EXI_LOAD_EFER;
+	vmcs_write(EXI_CONTROLS, ctrl_exit);
+	host_efer = rdmsr(MSR_EFER);
+	vmcs_write(HOST_EFER, host_efer ^ EFER_LMA);
+	return 0;
+}
+
+static int vmentry_cs_rpl()
+{
+	u16 host_sel_cs;
+	host_sel_cs = vmcs_read(HOST_SEL_CS);
+	vmcs_write(HOST_SEL_CS, host_sel_cs | 1);
+	return 0;
+}
+
+static int vmentry_tr_rpl()
+{
+	u16 host_sel_tr;
+	host_sel_tr = vmcs_read(HOST_SEL_TR);
+	vmcs_write(HOST_SEL_CS, host_sel_tr | 1);
+	return 0;
+}
+
+static int vmentry_cs_ti()
+{
+	u16 host_sel_cs;
+	host_sel_cs = vmcs_read(HOST_SEL_CS);
+	vmcs_write(HOST_SEL_CS, host_sel_cs | (1 << 2));
+	return 0;
+}
+
+static int vmentry_tr_ti()
+{
+	u16 host_sel_tr;
+	host_sel_tr = vmcs_read(HOST_SEL_TR);
+	vmcs_write(HOST_SEL_CS, host_sel_tr | (1 << 2));
+	return 0;
+}
+
+static int vmentry_cs_0()
+{
+	vmcs_write(HOST_SEL_CS, 0);
+	return 0;
+}
+
+static int vmentry_tr_0()
+{
+	vmcs_write(HOST_SEL_TR, 0);
+	return 0;
+}
+
+static int vmentry_addr_fs()
+{
+	vmcs_write(HOST_BASE_FS, ~0ull);
+	return 0;
+}
+
+static int vmentry_addr_gs()
+{
+	vmcs_write(HOST_BASE_GS, ~0ull);
+	return 0;
+}
+
+static int vmentry_addr_gdtr()
+{
+	vmcs_write(HOST_BASE_GDTR, ~0ull);
+	return 0;
+}
+
+static int vmentry_addr_idtr()
+{
+	vmcs_write(HOST_BASE_IDTR, ~0ull);
+	return 0;
+}
+
+static int vmentry_addr_tr()
+{
+	vmcs_write(HOST_BASE_TR, ~0ull);
+	return 0;
+}
+
+static int vmentry_hds()
+{
+	u32 ctrl_exit;
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	vmcs_write(EXI_CONTROLS, ctrl_exit & ~(EXI_HOST_64));
+	return 0;
+}
+
+static int vmentry_exi_host_64_pae()
+{
+	unsigned long host_cr4;
+	u32 ctrl_exit;
+	ctrl_exit = vmcs_read(EXI_CONTROLS);
+	vmcs_write(EXI_CONTROLS, ctrl_exit | EXI_HOST_64);
+	host_cr4 = vmcs_read(HOST_CR4);
+	vmcs_write(HOST_CR4, host_cr4 & ~(X86_CR4_PAE));
+	return 0;
+}
+
+static int vmentry_exi_host_rip()
+{
+	vmcs_write(HOST_RIP, ~0ull);
+	return 0;
+}
+
+#define	VMENTRY_INIT		0
+#define	VMENTRY_TESTS		1
+#define VMENTRY_RESET		2
+
+struct vmentry_check_table {
+	const char *name;
+	u64 flags;
+	int (*exit_handler)();
+};
+
+/*
+ * NOTE:
+ * Unsupported nested features are not tested here, which includes:
+ *	shadow VMCS realted features
+ *	TPR related features
+ *	process posted interrupts
+ *	VPID related features
+ *	virtual-interrupt delivery
+ *	virtualize x2APIC mode
+ *	NMI-window exiting
+ *	unrestricted guest
+ *	VMFUNC related features
+ *	EPT-violation #VE
+ *	vmexit/vmenter MSR store/load
+ *	vmenter event injection (better checked in event injection suite)
+ *	"load IA32_PERF_GLOBAL_CTRL" VM-exit control related
+ */
+static struct vmentry_check_table vmentry_cases[] = {
+	/*
+	 * Part I : Test basic vmentry checks
+	 * This part tests restrictions in Intel SDM 26.1
+	 * For the restriction of framework, we only test 3, 4 and 5 (except 5.a)
+	 */
+	{"No current VMCS vmenter", X86_EFLAGS_CF, vmentry_vmcs_absence},
+	{"VMLAUNCH with state not clear", X86_EFLAGS_ZF, vmentry_vmlaunch_err},
+	{"VMRESUME with state not launched", X86_EFLAGS_ZF, vmentry_vmresume_err},
+
+	/* Part II : Test checks on vmx controls and host state */
+	/* II.1 Checks on VMX Controls */
+	// 26.2.1.1 VM-Execution Control Fields
+	{"Reserved bits in PIN_CONTROLS field", X86_EFLAGS_ZF, vmentry_pin_ctrl},
+	{"Reserved bits in primary CPU CONTROLS field", X86_EFLAGS_ZF, vmentry_cpu0_ctrl},
+	{"Reserved bits in secondary CPU CONTROLS field", X86_EFLAGS_ZF, vmentry_cpu1_ctrl},
+	{"CR3 target count greater than 4", X86_EFLAGS_ZF, vmentry_cr3_target_count},
+	{"I/O bitmap address invalid (aligned)", X86_EFLAGS_ZF, vmentry_iobmp_invalid1},
+	{"I/O bitmap address invalid (exceed)", X86_EFLAGS_ZF, vmentry_iobmp_invalid2},
+	{"MSR bitmap address invalid (aligned)", X86_EFLAGS_ZF, vmentry_msrbmp_invalid1},
+	{"MSR bitmap address invalid (exceed)", X86_EFLAGS_ZF, vmentry_msrbmp_invalid2},
+	{"Consistency of NMI exiting and virtual NMIs", X86_EFLAGS_ZF, vmentry_nmi},
+	{"APIC-accesses address invalid (aligned)", X86_EFLAGS_ZF, vmentry_apic_invalid1},
+	{"APIC-accesses address invalid (exceed)", X86_EFLAGS_ZF, vmentry_apic_invalid2},
+	{"EPTP memory type", X86_EFLAGS_ZF, vmentry_eptp_memtype},
+	{"EPTP page walk length", X86_EFLAGS_ZF, vmentry_eptp_pwl},
+	{"EPTP page reserved bits (11:7)", X86_EFLAGS_ZF, vmentry_eptp_rsv_bits1},
+//	{"EPTP page reserved bits (63:N)", X86_EFLAGS_ZF, vmentry_eptp_rsv_bits2},
+	// 26.2.1.2 VM-Exit Control Fields
+	{"Reserved bits in EXI_CONTROLS field", X86_EFLAGS_ZF, vmentry_exit_ctrl},
+	{"Consistency of VMX-preemption timer (activate and save)",
+		X86_EFLAGS_ZF, vmentry_preempt},
+	// 26.2.1.3 VM-Entry Control Fields
+	{"Reserved bits in ENT_CONTROLS field", X86_EFLAGS_ZF, vmentry_ent_ctrl},
+	{"Entry to SMM with processor not in SMM", X86_EFLAGS_ZF, vmentry_ent_smm},
+	{"Deactivate dual-monitor treatment with processor not in SMM",
+		X86_EFLAGS_ZF, vmentry_deatv_dm},
+	// 26.2.2 Checks on Host Control Registers and MSRs
+	{"Invalid bits in host CR0", X86_EFLAGS_ZF, vmentry_invalid_cr0},
+	{"Invalid bits in host CR4", X86_EFLAGS_ZF, vmentry_invalid_cr4},
+	{"Invalid bits in host CR3", X86_EFLAGS_ZF, vmentry_invalid_cr3},
+	{"Invalid host sysenter esp addr", X86_EFLAGS_ZF, vmentry_sysenter_esp_addr},
+	{"Invalid host sysenter eip addr", X86_EFLAGS_ZF, vmentry_sysenter_eip_addr},
+//	{"Invalid host PAT", X86_EFLAGS_ZF, vmentry_host_PAT},
+//	{"Invalid host EFER - bits reserved", X86_EFLAGS_ZF, vmentry_host_EFER1},
+//	{"Invalid host EFER - LMA & LME", X86_EFLAGS_ZF, vmentry_host_EFER2},
+	// 26.2.3 Checks on Host Segment and Descriptor-Table Registers
+//	{"Invalid CS selector field - RPL", X86_EFLAGS_ZF, vmentry_cs_rpl},
+//	{"Invalid TR selector field - RPL", X86_EFLAGS_ZF, vmentry_tr_rpl},
+	{"Invalid CS selector field - TI flag", X86_EFLAGS_ZF, vmentry_cs_ti},
+	{"Invalid TR selector field - TI flag", X86_EFLAGS_ZF, vmentry_tr_ti},
+	{"Invalid CS selector field - 0000H", X86_EFLAGS_ZF, vmentry_cs_0},
+	{"Invalid TR selector field - 0000H", X86_EFLAGS_ZF, vmentry_tr_0},
+	{"Invalid base address of FS", X86_EFLAGS_ZF, vmentry_addr_fs},
+	{"Invalid base address of GS", X86_EFLAGS_ZF, vmentry_addr_gs},
+	{"Invalid base address of GDTR", X86_EFLAGS_ZF, vmentry_addr_gdtr},
+	{"Invalid base address of IDTR", X86_EFLAGS_ZF, vmentry_addr_idtr},
+	{"Invalid base address of TR", X86_EFLAGS_ZF, vmentry_addr_tr},
+	//26.2.4 Checks Related to Address-Space Size
+//	{"64bit host with EXI_HOST_64 unset", X86_EFLAGS_ZF, vmentry_hds},
+	{"Consistency of EXI_HOST_64 and CR4.PAE", X86_EFLAGS_ZF, vmentry_exi_host_64_pae},
+//	{"64bit host with invalid host RIP", X86_EFLAGS_ZF, vmentry_exi_host_rip},
+	{NULL, 0},
+};
+
+struct vmcs *vmentry_check_vmcs;
+
+static void vmentry_check_main()
+{
+	set_stage(VMENTRY_INIT);
+	vmcall();
+	cur_test = 0;
+	while (vmentry_cases[cur_test].name != NULL) {
+		test_success = false;
+		set_stage(VMENTRY_TESTS);
+		vmcall();
+		if (!test_success) {
+			set_stage(VMENTRY_RESET);
+			vmcall();
+			report(vmentry_cases[cur_test].name, 0);
+		}
+		cur_test++;
+	}
+	return;
+}
+
+static int vmentry_check_exit_handler()
+{
+	u64 guest_rip;
+	ulong reason;
+	u32 insn_len;
+	struct cpuid r;
+
+	guest_rip = vmcs_read(GUEST_RIP);
+	reason = vmcs_read(EXI_REASON) & 0xff;
+	insn_len = vmcs_read(EXI_INST_LEN);
+	switch (reason) {
+	case VMX_VMCALL:
+		vmcs_write(GUEST_RIP, guest_rip + insn_len);
+		switch (get_stage()) {
+		case VMENTRY_INIT:
+			/*
+			 * In VMENTRY_SAVE_VMCS stage, we should save current->vmcs
+			 * to vmentry_check_vmcs used by entry_failed_handler.
+			 */
+			vmentry_check_vmcs = alloc_page();
+			vmcs_clear(current->vmcs);
+			memcpy(vmentry_check_vmcs, current->vmcs, PAGE_SIZE);
+			make_vmcs_current(current->vmcs);
+			launched = 0;
+			// Get physical address width
+			r = cpuid(0x80000008);
+			phy_addr_width = r.a & 0xFF;
+			break;
+		case VMENTRY_TESTS:
+			// Write current RIP to vmentry_check_vmcs
+			make_vmcs_current(vmentry_check_vmcs);
+			vmcs_write(GUEST_RIP, guest_rip + insn_len);
+			vmcs_clear(vmentry_check_vmcs);
+			make_vmcs_current(current->vmcs);
+			if (vmentry_cases[cur_test].exit_handler())
+				return VMX_TEST_VMEXIT;
+			break;
+		case VMENTRY_RESET:
+			memcpy(current->vmcs, vmentry_check_vmcs, PAGE_SIZE);
+			if (reset_vmstat(current->vmcs))
+				return VMX_TEST_VMEXIT;
+			vmcs_write(GUEST_RIP, guest_rip + insn_len);
+			break;
+		// Should not reach here
+		default:
+			printf("\tERROR : Undefined stage, %d\n", get_stage());
+			print_vmexit_info();
+			return VMX_TEST_VMEXIT;
+		}
+		return VMX_TEST_RESUME;
+	default:
+		printf("Unknown exit reason, %d\n", reason);
+		print_vmexit_info();
+	}
+	return VMX_TEST_VMEXIT;
+}
+
+static int vmentry_check_entry_failed_handler()
+{
+	if (get_stage() != VMENTRY_TESTS) {
+		printf("\tERROR : Unknown stage, %d.\n", get_stage());
+		return VMX_TEST_EXIT;
+	}
+	if (host_rflags & vmentry_cases[cur_test].flags) {
+		test_success = true;
+		report(vmentry_cases[cur_test].name, 1);
+	}
+	memcpy(current->vmcs, vmentry_check_vmcs, PAGE_SIZE);
+	if (reset_vmstat(current->vmcs))
+			return VMX_TEST_VMEXIT;
+	return VMX_TEST_RESUME;
+}
+
 /* name/init/guest_main/exit_handler/syscall_handler/guest_regs
    basic_* just implement some basic functions */
 struct vmx_test vmx_tests[] = {
@@ -1139,5 +1783,8 @@ struct vmx_test vmx_tests[] = {
 		basic_entry_failed_handler, {0} },
 	{ "EPT framework", ept_init, ept_main, ept_exit_handler,
 		basic_syscall_handler, basic_entry_failed_handler, {0} },
+	{ "vmentry check", basic_init, vmentry_check_main,
+		vmentry_check_exit_handler, basic_syscall_handler,
+		vmentry_check_entry_failed_handler, {0} },
 	{ NULL, NULL, NULL, NULL, NULL, NULL, {0} },
 };
